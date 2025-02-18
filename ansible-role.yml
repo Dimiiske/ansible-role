@@ -1,0 +1,107 @@
+- hosts: localhost
+  remote_user: root
+  become: yes
+  vars:
+    target_uid: 1005 
+    target_gid: 1005
+    target_username: avatar
+    new_uid: 1010
+    new_gid: 1010
+    key: Key
+    password:
+
+  tasks:
+    - name: check if user 1005 uid is already created
+      command: getent passwd "{{ target_uid }}"
+      ignore_errors: true
+      register: user_check
+
+    - name: check if user 1005 is avatar
+      command: id -u "{{ target_username }}"
+      ignore_errors: true
+      register: username_check
+
+    - name: Greate new group for old user
+      group:
+        name: "{{ user_check.stdout.split(':')[0] }}"
+        state: present
+        gid: "{{ new_gid }}"
+      when: user_check.rc == 0 and username_check.rc != 0 and user_check.stdout.split(':')[0] != target_username
+      
+    - name: "change user uid and gid if it's not avatar"
+      user:
+        name: "{{ user_check.stdout.split(':')[0] }}"
+        uid:  "{{ new_uid }}"
+        group: "{{ new_gid }}"
+      when: user_check.rc == 0 and username_check.rc != 0 and user_check.stdout.split(':')[0] != target_username
+
+    - name: change uid files
+      command: find / -user "{{ target_uid }}" -exec chown -h "{{ new_uid }}" {} \;
+      ignore_errors: true
+      when: user_check.rc == 0 and username_check.rc != 0 and user_check.stdout.split(':')[0] != target_username
+
+    - name: change gid files
+      command: find / -gid "{{ target_gid }}" -exec chgrp -v "{{ new_uid }}" {} \;
+      ignore_errors: true
+      when: user_check.rc == 0 and username_check.rc != 0 and user_check.stdout.split(':')[0] != target_username
+
+    - name: Greate group new 1005
+      group:
+        name: "{{ target_username }}"
+        state: present
+        gid: "{{ target_gid }}"
+
+    - name: Add user to remote hosts
+      user:
+        name: "{{ target_username }}"
+        password: "{{ password }}"
+        uid: "{{ target_uid }}"
+        group: "{{ target_gid }}"
+        groups:
+          - docker
+          - sudo
+          - adm
+        shell: /bin/bash
+
+    - name: Add authorized keys of the users
+      authorized_key:
+        user: "{{ target_username }}"
+        state: present
+        key: "{{ key }}"
+
+    - name: remove docker daemon from autostart
+      service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - docker.service
+        - docker.socket
+
+    - name: get username by id
+      shell: id -nu 1005
+      register: username_out
+
+    - name: enable user autologin
+      lineinfile:
+        path: /etc/gdm3/custom.conf
+        insertafter: '^\[daemon\]'
+        line: "{{ item }}"
+      loop:
+        - "AutomaticLogin={{ username_out.stdout }}"
+        - "AutomaticLoginEnable=True"
+
+    - name: start dockder with user login
+      lineinfile:
+        path: "/home/{{ username_out.stdout }}/.profile"
+        regexp: "^sudo"
+        line: sudo systemctl start docker.service
+
+    - name: ensure 1005 user can run sudo commands without password
+      copy:
+        content: "{{ username_out.stdout }} ALL=(ALL) NOPASSWD: ALL"
+        dest: "/etc/sudoers.d/{{ username_out.stdout }}"
+        mode: 0440
+    
+    - name: reboot
+      reboot:
